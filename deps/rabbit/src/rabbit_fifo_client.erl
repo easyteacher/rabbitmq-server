@@ -738,6 +738,14 @@ handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},
                        consumer_deliveries = CDels0} = State0) ->
     QRef = qref(Leader),
     {LastId, _} = lists:last(IdMsgs),
+    %% Note:
+    %% https://github.com/rabbitmq/rabbitmq-server/issues/3729
+    %%
+    %% Previously there had been a default value in the consumer deliveries map
+    %% to cover cases where the consumer had been cancelled. We can't restore
+    %% the default value because the pending messages may not be delivered.
+    %% Instead, we choose to return the messages to the quorum queue process.
+    %% maps:get(Tag, CDels0, #consumer{last_msg_id = -1})
     Consumer = #consumer{ack = Ack} = maps:get(Tag, CDels0),
     %% format as a deliver action
     Del = {deliver, Tag, Ack, transform_msgs(QName, QRef, IdMsgs)},
