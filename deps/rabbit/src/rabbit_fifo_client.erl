@@ -299,8 +299,8 @@ settle(ConsumerTag, [_|_] = MsgIds,
 %% @param MsgIds the message ids to return received
 %% from {@link rabbit_fifo:delivery/0.}
 %% @param State the {@module} state
-%% @returns
-%% `{ok | slow, State}' if the command was successfully sent. If the return
+%% @returns LRB TODO this seems incorrect
+%% `{State, list()}' if the command was successfully sent. If the return
 %% tag is `slow' it means the limit is approaching and it is time to slow down
 %% the sending rate.
 %%
@@ -310,10 +310,8 @@ return(ConsumerTag, [_|_] = MsgIds, #state{slow = false} = State0) ->
     Node = pick_server(State0),
     % TODO: make rabbit_fifo return support lists of message ids
     Cmd = rabbit_fifo:make_return(consumer_id(ConsumerTag), MsgIds),
-    case send_command(Node, undefined, Cmd, normal, State0) of
-        {_, S} ->
-            {S, []}
-    end;
+    {_Tag, State1} = send_command(Node, undefined, Cmd, normal, State0),
+    {State1, []};
 return(ConsumerTag, [_|_] = MsgIds,
        #state{unsent_commands = Unsent0} = State0) ->
     ConsumerId = consumer_id(ConsumerTag),
@@ -323,7 +321,8 @@ return(ConsumerTag, [_|_] = MsgIds,
                               fun ({Settles, Returns, Discards}) ->
                                       {Settles, Returns ++ MsgIds, Discards}
                               end, {[], MsgIds, []}, Unsent0),
-    {State0#state{unsent_commands = Unsent}, []}.
+    State1 = State0#state{unsent_commands = Unsent},
+    {State1, []}.
 
 %% @doc Discards a checked out message.
 %% If the queue has a dead_letter_handler configured this will be called.
@@ -733,19 +732,23 @@ maybe_auto_ack(false, {deliver, Tag, _Ack, Msgs} = Deliver, State0) ->
     {ok, State, [Deliver] ++ Actions}.
 
 
-handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},
-                #state{cfg = #cfg{cluster_name = QName},
-                       consumer_deliveries = CDels0} = State0) ->
-    QRef = qref(Leader),
-    {LastId, _} = lists:last(IdMsgs),
+handle_delivery(_Leader, {delivery, Tag, [_ | _] = IdMsgs},
+                #state{consumer_deliveries = CDels} = State0) when not is_map_key(Tag, CDels) ->
     %% Note:
     %% https://github.com/rabbitmq/rabbitmq-server/issues/3729
     %%
     %% Previously there had been a default value in the consumer deliveries map
+    %% (old code: maps:get(Tag, CDels0, #consumer{last_msg_id = -1}))
     %% to cover cases where the consumer had been cancelled. We can't restore
     %% the default value because the pending messages may not be delivered.
     %% Instead, we choose to return the messages to the quorum queue process.
-    %% maps:get(Tag, CDels0, #consumer{last_msg_id = -1})
+    {State1, Deliveries} = return(Tag, IdMsgs, State0),
+    {ok, State1, Deliveries};
+handle_delivery(Leader, {delivery, Tag, [{FstId, _} | _] = IdMsgs},
+                #state{cfg = #cfg{cluster_name = QName},
+                       consumer_deliveries = CDels0} = State0) when is_map_key(Tag, CDels0) ->
+    QRef = qref(Leader),
+    {LastId, _} = lists:last(IdMsgs),
     Consumer = #consumer{ack = Ack} = maps:get(Tag, CDels0),
     %% format as a deliver action
     Del = {deliver, Tag, Ack, transform_msgs(QName, QRef, IdMsgs)},
